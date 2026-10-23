@@ -1,0 +1,6 @@
+# Project Rules: md-surgeon-mcp
+- Language: Rust (Edition 2021).
+- Architecture: Synchronous stdio JSON-RPC 2.0 MCP Server (keep dependencies minimal and compilation fast).
+- Allowed crates: `pulldown-cmark`, `serde`, `serde_json`, `anyhow`. Do NOT add `tokio` or heavy async runtimes unless strictly required; standard `std::io::BufRead` over `stdin` and `stdout` is preferred for lightweight stdio MCP.
+- Validation: Every code modification MUST be verified by running `cargo test` and `cargo check` in the terminal.
+- Byte Slicing Rule: Never use regex to parse Markdown headings. Always use `pulldown-cmark::Parser::new_ext(..., Options::all()).into_offset_iter()` to get exact UTF-8 byte ranges (`start..end`).
