@@ -94,9 +94,29 @@ pub struct ModuleEdit {
     #[serde(alias = "new_markdown_content")]
     pub new_content: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubmoduleDraft {
+    pub title: String,
+    pub summary: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModuleDraft {
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub submodules: Vec<SubmoduleDraft>,
+}
 ```
 
 ### 5.2 Funciones Públicas
+
+- `pub fn render_modular_document(doc_title: Option<&str>, modules: &[ModuleDraft]) -> String`
+  Genera un documento Markdown modular estructurado con encabezados `##` y `###`, resúmenes automáticos en blockquote `> ` ($\le 120$ caracteres) y separadores `---\n\n` entre módulos principales.
 
 - `pub fn get_document_tree(markdown: &str) -> Vec<ModuleNode>`
   Recorre `markdown` en una sola pasada con `into_offset_iter`, construyendo el árbol jerárquico de nodos con su `id`, `title`, `level`, `summary`, `byte_range` interno y `submodules`.
@@ -114,13 +134,24 @@ pub struct ModuleEdit {
 
 ## 6. Contrato JSON-RPC 2.0 y Herramientas MCP (`src/mcp.rs`)
 
-El servidor se comunica por `stdio` (`stdin`/`stdout`) usando mensajes JSON-RPC 2.0 delimitados por salto de línea (`\n`). En la respuesta al método `initialize`, el servidor inyecta el campo estándar `"instructions"` con directivas claras para que cualquier agente de IA priorice el flujo quirúrgico de 3 pasos (`get_document_index` -> `prepare_module_edit` -> `apply_module_edit`) sobre `read_file`/`edit_file`. Cada herramienta incluye además el bloque oficial `"annotations"` de MCP en `tools/list`.
+El servidor se comunica por `stdio` (`stdin`/`stdout`) usando mensajes JSON-RPC 2.0 delimitados por salto de línea (`\n`). En la respuesta al método `initialize`, el servidor inyecta el campo estándar `"instructions"` con directivas claras para que cualquier agente de IA priorice el flujo modular de 4 pasos (`init_modular_document` para nuevos archivos, y `get_document_index` -> `prepare_module_edit` -> `apply_module_edit` para existentes) sobre `read_file`/`write_file`/`edit_file`. Cada herramienta incluye además el bloque oficial `"annotations"` de MCP en `tools/list`.
 
-### 6.1 `get_document_index`
+### 6.1 `init_modular_document` (Inicialización Estructurada)
+Genera en disco un documento Markdown estructurado modularmente (`##`, `###` y resúmenes `> ` $\le 120$ caracteres) y devuelve de inmediato el árbol de módulos indexado (`DocumentIndexResponse`). Si el archivo ya existe y `overwrite` es `false`, falla de forma segura para evitar destrucciones accidentales.
+
+- **Annotations**: `{ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }`
+- **Argumentos**:
+  - `file_path`: Ruta del archivo a crear.
+  - `document_title`: Título principal `# ` opcional.
+  - `modules`: Arreglo de borradores de módulos (`ModuleDraft`) con título, resumen, contenido opcional y submódulos.
+  - `overwrite`: Booleano opcional (`false` por defecto).
+- **Respuesta**: Devuelve `DocumentIndexResponse` con el árbol parseado.
+
+### 6.2 `get_document_index`
 - **Annotations**: `{ "readOnlyHint": true, "destructiveHint": false }`
 - **Argumentos**: `{ "file_path": "PLAN.md" }`
 
-### 6.2 `prepare_module_edit` (Soporte Batch + Retrocompatibilidad)
+### 6.3 `prepare_module_edit` (Soporte Batch + Retrocompatibilidad)
 Extrae en una sola llamada el contenido actual de múltiples módulos/submódulos a editar (`target_ids`) y el mapa de contenidos de referencia (`guide_ids`). Acepta opcionalmente `target_id` individual por retrocompatibilidad.
 
 - **Annotations**: `{ "readOnlyHint": true, "destructiveHint": false }`
@@ -137,7 +168,7 @@ Extrae en una sola llamada el contenido actual de múltiples módulos/submódulo
   }
   ```
 
-### 6.3 `apply_module_edit` (Soporte Batch + Eliminación Limpia)
+### 6.4 `apply_module_edit` (Soporte Batch + Eliminación Limpia)
 Parchea en disco `N` módulos o submódulos en una sola operación atómica de disco recibiendo `edits: Vec<ModuleEdit>` (y manteniendo retrocompatibilidad con `target_id` + `new_markdown_content` en la raíz).
 
 - **Annotations**: `{ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }`

@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
-use crate::parser::{self, ContextBundle, ModuleEdit, ModuleNode};
+use crate::parser::{self, ContextBundle, ModuleDraft, ModuleEdit, ModuleNode};
 
 /// Deserializador flexible que permite recibir tanto un `"id"` suelto como un arreglo `["id1", "id2"]`.
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -84,6 +84,18 @@ pub struct DocumentIndexResponse {
     pub modules: Vec<ModuleNode>,
 }
 
+/// Argumentos para la tool MCP `init_modular_document`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitModularDocumentArgs {
+    pub file_path: String,
+    #[serde(default)]
+    pub document_title: Option<String>,
+    #[serde(default)]
+    pub modules: Vec<ModuleDraft>,
+    #[serde(default)]
+    pub overwrite: Option<bool>,
+}
+
 /// Argumentos para la tool MCP `prepare_module_edit` (soporta lote `target_ids` y `target_id` individual).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareModuleEditArgs {
@@ -152,6 +164,40 @@ pub struct ApplyModuleEditResponse {
     pub bytes_written: usize,
 }
 
+/// Ejecuta la tool `init_modular_document`.
+pub fn handle_init_modular_document(args: InitModularDocumentArgs) -> Result<DocumentIndexResponse> {
+    let path = std::path::Path::new(&args.file_path);
+    let overwrite = args.overwrite.unwrap_or(false);
+
+    if path.exists() && !overwrite {
+        return Err(anyhow!(
+            "El archivo '{}' ya existe. Use 'get_document_index' + 'prepare_module_edit' + 'apply_module_edit' para modificarlo sin destruirlo, o especifique 'overwrite: true' si desea sobrescribirlo.",
+            args.file_path
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Error al crear los directorios padres para '{}'",
+                    args.file_path
+                )
+            })?;
+        }
+    }
+
+    let markdown = parser::render_modular_document(args.document_title.as_deref(), &args.modules);
+    fs::write(&args.file_path, &markdown)
+        .with_context(|| format!("Error al escribir el archivo '{}'", args.file_path))?;
+
+    let modules = parser::get_document_tree(&markdown);
+    Ok(DocumentIndexResponse {
+        file_path: args.file_path,
+        modules,
+    })
+}
+
 /// Ejecuta la tool `get_document_index`.
 pub fn handle_get_document_index(args: GetDocumentIndexArgs) -> Result<DocumentIndexResponse> {
     let markdown = fs::read_to_string(&args.file_path)
@@ -195,6 +241,60 @@ pub fn handle_apply_module_edit(args: ApplyModuleEditArgs) -> Result<ApplyModule
 fn get_tools_list() -> Value {
     json!({
         "tools": [
+            {
+                "name": "init_modular_document",
+                "description": "PREFERRED OVER write_file/create_file FOR NEW PLANNING & ARCHITECTURE .MD FILES. Scaffolds a properly formatted modular Markdown document with ## modules, ### submodules, and > 120-char summaries, returning the indexed module tree immediately.",
+                "annotations": {
+                    "readOnlyHint": false,
+                    "destructiveHint": false,
+                    "idempotentHint": true
+                },
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["file_path", "modules"],
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the Markdown file to create."
+                        },
+                        "document_title": {
+                            "type": "string",
+                            "description": "Optional top-level # Document Title."
+                        },
+                        "modules": {
+                            "type": "array",
+                            "description": "List of main ## modules, each with summary, optional content, and ### submodules.",
+                            "items": {
+                                "type": "object",
+                                "required": ["title", "summary"],
+                                "properties": {
+                                    "title": { "type": "string", "description": "Module title (e.g. '1. Architecture')." },
+                                    "summary": { "type": "string", "description": "Short concise summary (max 120 chars)." },
+                                    "content": { "type": "string", "description": "Optional introductory markdown content for the module." },
+                                    "submodules": {
+                                        "type": "array",
+                                        "description": "List of child ### submodules.",
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["title", "summary", "content"],
+                                            "properties": {
+                                                "title": { "type": "string", "description": "Submodule title." },
+                                                "summary": { "type": "string", "description": "Submodule summary (max 120 chars)." },
+                                                "content": { "type": "string", "description": "Submodule markdown body content." }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "If false and the file exists, fails safely to prevent accidental overwrites. Set true only if intentionally replacing the entire document."
+                        }
+                    }
+                }
+            },
             {
                 "name": "get_document_index",
                 "description": "ALWAYS CALL THIS FIRST before reading or editing any Markdown (.md) file. Preferred over read_file. Parses the document without loading full text into context and returns a lightweight hierarchical semantic tree of modules (#, ##) and submodules (###). Each node provides unique hierarchical composite IDs ('parent/child' for submodules to avoid collisions) and a concise summary (max 120 chars) to navigate the document structure efficiently.",
@@ -337,6 +437,15 @@ fn dispatch_tool_call(params: Option<Value>) -> std::result::Result<Value, JsonR
     })?;
 
     let result = match call.name.as_str() {
+        "init_modular_document" => {
+            let args: InitModularDocumentArgs =
+                serde_json::from_value(call.arguments).map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Argumentos inválidos para init_modular_document: {e}"),
+                    data: None,
+                })?;
+            handle_init_modular_document(args).and_then(|res| wrap_tool_ok(&res))
+        }
         "get_document_index" => {
             let args: GetDocumentIndexArgs =
                 serde_json::from_value(call.arguments).map_err(|e| JsonRpcError {
@@ -388,7 +497,7 @@ pub fn handle_jsonrpc_request(req: JsonRpcRequest) -> Option<JsonRpcResponse> {
                 "name": "md-surgeon-mcp",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "For any Markdown (.md) planning, design, architecture, or documentation file, ALWAYS prioritize the 3-step md-surgeon workflow (get_document_index -> prepare_module_edit -> apply_module_edit) instead of reading or rewriting entire files with read_file/edit_file. This guarantees surgical byte-accurate edits, prevents token overflow, and preserves document structure."
+            "instructions": "For any Markdown (.md) planning, design, architecture, or documentation file, ALWAYS prioritize the 4-step md-surgeon workflow (init_modular_document for new files, get_document_index -> prepare_module_edit -> apply_module_edit for existing files) instead of reading or rewriting entire files with read_file/write_file/edit_file. This guarantees surgical byte-accurate edits, prevents token overflow, and preserves document structure."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(get_tools_list()),
@@ -506,11 +615,23 @@ Política de compactación por clave y TTL de 7 días.
         };
         let list_resp = handle_jsonrpc_request(list_req).unwrap();
         let tools_arr = list_resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert!(tools_arr[0]["description"].as_str().unwrap().starts_with("ALWAYS CALL THIS FIRST"));
-        assert_eq!(tools_arr[0]["annotations"]["readOnlyHint"], json!(true));
+        assert_eq!(tools_arr.len(), 4);
+
+        assert_eq!(tools_arr[0]["name"], json!("init_modular_document"));
+        assert!(tools_arr[0]["description"].as_str().unwrap().starts_with("PREFERRED OVER write_file"));
+        assert_eq!(tools_arr[0]["annotations"]["readOnlyHint"], json!(false));
+        assert_eq!(tools_arr[0]["annotations"]["idempotentHint"], json!(true));
+
+        assert_eq!(tools_arr[1]["name"], json!("get_document_index"));
+        assert!(tools_arr[1]["description"].as_str().unwrap().starts_with("ALWAYS CALL THIS FIRST"));
         assert_eq!(tools_arr[1]["annotations"]["readOnlyHint"], json!(true));
-        assert_eq!(tools_arr[2]["annotations"]["readOnlyHint"], json!(false));
-        assert_eq!(tools_arr[2]["annotations"]["idempotentHint"], json!(true));
+
+        assert_eq!(tools_arr[2]["name"], json!("prepare_module_edit"));
+        assert_eq!(tools_arr[2]["annotations"]["readOnlyHint"], json!(true));
+
+        assert_eq!(tools_arr[3]["name"], json!("apply_module_edit"));
+        assert_eq!(tools_arr[3]["annotations"]["readOnlyHint"], json!(false));
+        assert_eq!(tools_arr[3]["annotations"]["idempotentHint"], json!(true));
 
         // 1. Probar `get_document_index`
         let index_res = handle_get_document_index(GetDocumentIndexArgs {
@@ -587,6 +708,85 @@ Política de compactación por clave y TTL de 7 días.
         assert!(final_disk_md.contains("Política de tiering automático a S3 a los 30 días."));
         assert!(!final_disk_md.contains("TTL de 7 días"));
         assert!(final_disk_md.contains("## 1. Visión"));
+
+        let _ = fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_init_modular_document_flow() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path = env::temp_dir().join(format!("md_surgeon_init_test_{nanos}.md"));
+        let file_path_str = temp_path.to_string_lossy().to_string();
+
+        let init_tool_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(20)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "init_modular_document",
+                "arguments": {
+                    "file_path": file_path_str,
+                    "document_title": "Plan de Infraestructura",
+                    "modules": [
+                        {
+                            "title": "1. Redes y VPC",
+                            "summary": "Configuración de subredes públicas y privadas.",
+                            "content": "CIDR block 10.0.0.0/16.",
+                            "submodules": [
+                                {
+                                    "title": "NAT Gateway",
+                                    "summary": "Salida a internet para instancias privadas.",
+                                    "content": "Alta disponibilidad en 3 AZs."
+                                }
+                            ]
+                        }
+                    ]
+                }
+            })),
+        };
+
+        // 1. Creación exitosa
+        let resp = handle_jsonrpc_request(init_tool_req.clone()).unwrap();
+        assert!(resp.error.is_none());
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let index: DocumentIndexResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(index.modules.len(), 1);
+        assert_eq!(index.modules[0].id, "plan-de-infraestructura");
+        assert_eq!(index.modules[0].submodules[0].id, "1-redes-y-vpc");
+        assert_eq!(
+            index.modules[0].submodules[0].submodules[0].id,
+            "1-redes-y-vpc/nat-gateway"
+        );
+
+        // 2. Falla segura al intentar sobrescribir sin overwrite: true
+        let fail_resp = handle_jsonrpc_request(init_tool_req).unwrap();
+        let is_err = fail_resp.result.unwrap()["isError"].as_bool().unwrap();
+        assert!(is_err);
+
+        // 3. Sobrescritura exitosa con overwrite: true
+        let overwrite_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(21)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "init_modular_document",
+                "arguments": {
+                    "file_path": file_path_str,
+                    "document_title": "Plan de Infraestructura v2",
+                    "overwrite": true,
+                    "modules": []
+                }
+            })),
+        };
+        let overwrite_resp = handle_jsonrpc_request(overwrite_req).unwrap();
+        let is_err = overwrite_resp.result.unwrap()["isError"].as_bool().unwrap();
+        assert!(!is_err);
 
         let _ = fs::remove_file(temp_path);
     }

@@ -35,6 +35,25 @@ pub struct ContextBundle {
     pub guides: BTreeMap<String, String>,
 }
 
+/// Borrador para inicializar un submódulo (`###`) estructurado.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubmoduleDraft {
+    pub title: String,
+    pub summary: String,
+    pub content: String,
+}
+
+/// Borrador para inicializar un módulo principal (`##`) estructurado.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModuleDraft {
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub submodules: Vec<SubmoduleDraft>,
+}
+
 /// Operación individual de edición dentro de un lote (`batch`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModuleEdit {
@@ -487,6 +506,71 @@ pub fn replace_module_content(
     replace_multiple_modules(markdown, &edits)
 }
 
+/// Genera un documento Markdown modular estructurado a partir de borradores de módulos y submódulos.
+pub fn render_modular_document(doc_title: Option<&str>, modules: &[ModuleDraft]) -> String {
+    let mut doc = String::new();
+
+    if let Some(title) = doc_title.map(str::trim).filter(|t| !t.is_empty()) {
+        doc.push_str("# ");
+        doc.push_str(title);
+        doc.push_str("\n\n");
+    }
+
+    for (idx, module) in modules.iter().enumerate() {
+        let clean_mod_title = module.title.trim();
+        let clean_mod_summary = format_summary(&module.summary);
+
+        doc.push_str("## ");
+        doc.push_str(clean_mod_title);
+        doc.push('\n');
+
+        if !clean_mod_summary.is_empty() {
+            doc.push_str("> ");
+            doc.push_str(&clean_mod_summary);
+            doc.push_str("\n\n");
+        } else {
+            doc.push('\n');
+        }
+
+        if let Some(content) = &module.content {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                doc.push_str(trimmed);
+                doc.push_str("\n\n");
+            }
+        }
+
+        for sub in &module.submodules {
+            let clean_sub_title = sub.title.trim();
+            let clean_sub_summary = format_summary(&sub.summary);
+
+            doc.push_str("### ");
+            doc.push_str(clean_sub_title);
+            doc.push('\n');
+
+            if !clean_sub_summary.is_empty() {
+                doc.push_str("> ");
+                doc.push_str(&clean_sub_summary);
+                doc.push_str("\n\n");
+            } else {
+                doc.push('\n');
+            }
+
+            let trimmed_content = sub.content.trim();
+            if !trimmed_content.is_empty() {
+                doc.push_str(trimmed_content);
+                doc.push_str("\n\n");
+            }
+        }
+
+        if idx + 1 < modules.len() {
+            doc.push_str("---\n\n");
+        }
+    }
+
+    doc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,5 +792,91 @@ Registro inmutable en bóveda de auditoría para cada pago.
             },
         ];
         assert!(replace_multiple_modules(SAMPLE_DOC, &overlapping_edits).is_err());
+    }
+
+    #[test]
+    fn test_render_and_parse_modular_document_roundtrip() {
+        let drafts = vec![
+            ModuleDraft {
+                title: "1. Arquitectura del Sistema".to_string(),
+                summary: "Visión general del diseño hexagonal y comunicación por eventos.".to_string(),
+                content: Some("El sistema sigue principios de desacoplamiento estricto.".to_string()),
+                submodules: vec![
+                    SubmoduleDraft {
+                        title: "API Gateway".to_string(),
+                        summary: "Gestión de tráfico perimetral y autenticación JWT.".to_string(),
+                        content: "- Endpoint: `/api/v1`\n- Rate limit: 100 req/s".to_string(),
+                    },
+                    SubmoduleDraft {
+                        title: "Bóveda de Seguridad".to_string(),
+                        summary: "Almacenamiento seguro de llaves criptográficas.".to_string(),
+                        content: "Utiliza HSM y rotación periódica.".to_string(),
+                    },
+                ],
+            },
+            ModuleDraft {
+                title: "2. Modelo de Datos".to_string(),
+                summary: "Esquema relacional en PostgreSQL optimizado para alta concurrencia.".to_string(),
+                content: None,
+                submodules: vec![
+                    SubmoduleDraft {
+                        title: "Tabla Transacciones".to_string(),
+                        summary: "Registro inmutable de movimientos financieros.".to_string(),
+                        content: "- `id`: UUID PRIMARY KEY\n- `amount`: NUMERIC(14, 2)".to_string(),
+                    },
+                ],
+            },
+        ];
+
+        let rendered = render_modular_document(Some("Especificación Plataforma"), &drafts);
+
+        let tree = get_document_tree(&rendered);
+        assert_eq!(tree.len(), 1);
+
+        let root = &tree[0];
+        assert_eq!(root.id, "especificacion-plataforma");
+        assert_eq!(root.level, 1);
+        assert_eq!(root.submodules.len(), 2);
+
+        // Módulo 1
+        let mod1 = &root.submodules[0];
+        assert_eq!(mod1.id, "1-arquitectura-del-sistema");
+        assert_eq!(mod1.level, 2);
+        assert_eq!(
+            mod1.summary,
+            "Visión general del diseño hexagonal y comunicación por eventos."
+        );
+        assert_eq!(mod1.submodules.len(), 2);
+
+        assert_eq!(mod1.submodules[0].id, "1-arquitectura-del-sistema/api-gateway");
+        assert_eq!(mod1.submodules[0].level, 3);
+        assert_eq!(
+            mod1.submodules[0].summary,
+            "Gestión de tráfico perimetral y autenticación JWT."
+        );
+
+        assert_eq!(mod1.submodules[1].id, "1-arquitectura-del-sistema/boveda-de-seguridad");
+        assert_eq!(mod1.submodules[1].level, 3);
+        assert_eq!(
+            mod1.submodules[1].summary,
+            "Almacenamiento seguro de llaves criptográficas."
+        );
+
+        // Módulo 2
+        let mod2 = &root.submodules[1];
+        assert_eq!(mod2.id, "2-modelo-de-datos");
+        assert_eq!(mod2.level, 2);
+        assert_eq!(
+            mod2.summary,
+            "Esquema relacional en PostgreSQL optimizado para alta concurrencia."
+        );
+        assert_eq!(mod2.submodules.len(), 1);
+
+        assert_eq!(mod2.submodules[0].id, "2-modelo-de-datos/tabla-transacciones");
+        assert_eq!(mod2.submodules[0].level, 3);
+        assert_eq!(
+            mod2.submodules[0].summary,
+            "Registro inmutable de movimientos financieros."
+        );
     }
 }

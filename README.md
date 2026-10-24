@@ -31,6 +31,7 @@ md-surgeon-mcp Approach:
 
 ## Features
 
+- **Modular Document Scaffolding**: Use `init_modular_document` to create properly structured planning documents from scratch with automatic headers, 120-char summaries, and dividers, returning the indexed tree immediately.
 - **Ultra-Fast & Zero Runtime Dependencies**: Pure Rust with `pulldown-cmark` byte offsets (`into_offset_iter`). Runs in microseconds with zero heavy runtimes or bloat.
 - **Hierarchical Semantic Tree**: Automatically indexes `#`, `##`, and `###` headers, assigning collision-free composite IDs (`parent/child`, e.g., `2-database/payments-table`).
 - **Zero-Token Automatic Summaries**: Extracts the first sentence or paragraph/blockquote (max 120 chars) under each header, giving the AI full semantic navigation without returning token-heavy bodies.
@@ -89,13 +90,22 @@ sequenceDiagram
 
 ## MCP Tools Reference
 
-### 1. `get_document_index`
+### 1. `init_modular_document`
+*Scaffolds a clean modular Markdown document with `##` modules, `###` submodules, and `>` 120-char summaries, returning the indexed module tree immediately.*
+- **Annotations**: `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true`
+- **Arguments**:
+  - `file_path` (string, required): Path to the Markdown file to create.
+  - `document_title` (string, optional): Top-level `# ` document title.
+  - `modules` (array of objects, required): List of main `##` modules with `title`, `summary`, optional `content`, and `submodules`.
+  - `overwrite` (boolean, optional, default: `false`): If false and the file exists, fails safely to prevent accidental data loss.
+
+### 2. `get_document_index`
 *Returns the semantic hierarchical tree of modules (`#`, `##`) and submodules (`###`) with automatic summaries.*
 - **Annotations**: `readOnlyHint: true`, `destructiveHint: false`
 - **Arguments**:
   - `file_path` (string, required): Path to the Markdown file.
 
-### 2. `prepare_module_edit`
+### 3. `prepare_module_edit`
 *Fetches current content of targets for editing and reference guides for read-only context in a single call.*
 - **Annotations**: `readOnlyHint: true`, `destructiveHint: false`
 - **Arguments**:
@@ -104,7 +114,7 @@ sequenceDiagram
   - `target_id` (string, optional): Single ID (backward compatibility).
   - `guide_ids` (array of strings, optional): List of module IDs to retrieve as read-only reference.
 
-### 3. `apply_module_edit`
+### 4. `apply_module_edit`
 *Applies surgical byte-range replacements or deletions in bottom-up order, leaving untouched sections pristine.*
 - **Annotations**: `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true`
 - **Arguments**:
